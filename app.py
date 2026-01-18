@@ -360,3 +360,8 @@ def get_all_images():
 if __name__ == '__main__':
     print("Facebook Profile Scraper API v2.3 + Imrul’s Zone UI")
     app.run(host='0.0.0.0', port=5000, threaded=True, debug=False)
+    import os
+
+if name == "main":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, threaded=True, debug=False)
