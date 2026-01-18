@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Imrul’s Zone</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div id="emoji-layer" aria-hidden="true"></div>
+
+  <main class="wrap">
+    <section class="card">
+      <h1 class="title">Imrul’s Zone</h1>
+      <p class="subtitle">FB Pic Downloader</p>
+
+      <!-- Link paste bar -->
+      <div class="inputRow">
+        <input id="fbUrl" type="url" placeholder="Paste Facebook profile link (https://www.facebook.com/...)" />
+        <button id="goBtn">Download Pics</button>
+      </div>
+
+      <p class="hint">Public profile হলে সাধারণত কাজ করে। Private/login লাগলে fail হতে পারে।</p>
+      <div id="status" class="status"></div>
+
+      <!-- Results -->
+      <div id="results" class="results hidden">
+        <div class="grid">
+          <div class="box">
+            <h3>Profile Picture</h3>
+            <div id="profileBlock" class="imgBlock"></div>
+          </div>
+
+          <div class="box">
+            <h3>Cover Photo</h3>
+            <div id="coverBlock" class="imgBlock"></div>
+          </div>
+        </div>
+
+        <div class="box">
+          <h3>Top Photos (up to 10)</h3>
+          <div id="photoList" class="photoList"></div>
+        </div>
+      </div>
+
+      <footer class="footer">
+        <span>API: <code>/api/all?url=...</code></span>
+      </footer>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
