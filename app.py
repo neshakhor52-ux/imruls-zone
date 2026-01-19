@@ -1,10 +1,10 @@
-from flask import Flask, request, jsonify, render_template
+from flask import Flask, request, jsonify
 import requests
 from bs4 import BeautifulSoup
 import re
 import time
 from datetime import datetime
-from urllib.parse import urlparse
+from urllib.parse import urlparse, unquote
 import logging
 
 app = Flask(__name__)
@@ -17,7 +17,6 @@ start_time = datetime.now()
 ALLOWED_DOMAINS = ['www.facebook.com', 'm.facebook.com', 'facebook.com']
 REQUEST_TIMEOUT = 30
 MAX_RETRIES = 2
-
 
 class FacebookProfileScraper:
     def __init__(self):
@@ -38,72 +37,87 @@ class FacebookProfileScraper:
             'Upgrade-Insecure-Requests': '1',
             'Dnt': '1'
         }
-
-    def validate_url(self, url: str) -> bool:
+        
+    def validate_url(self, url):
         try:
             parsed = urlparse(url)
             if parsed.scheme not in ['http', 'https']:
                 return False
             if parsed.netloc not in ALLOWED_DOMAINS:
                 return False
-            if any(c in url for c in ['<', '>', '"', "'"]):
+            if any(char in url for char in ['<', '>', '"', "'"]):
                 return False
             return True
         except Exception as e:
             logger.error(f"URL validation error: {e}")
             return False
-
-    def initialize_session(self) -> bool:
+        
+    def initialize_session(self):
         try:
             init_url = 'https://www.facebook.com/'
-            r = self.session.get(init_url, headers=self.headers, timeout=REQUEST_TIMEOUT, allow_redirects=True)
-            return r.status_code == 200
+            response = self.session.get(
+                init_url, 
+                headers=self.headers, 
+                timeout=REQUEST_TIMEOUT, 
+                allow_redirects=True
+            )
+            return response.status_code == 200
         except Exception as e:
             logger.error(f"Session initialization error: {e}")
             return False
-
-    def normalize_profile_url(self, url: str):
+    
+    def normalize_profile_url(self, url):
         if not self.validate_url(url):
             return None
-
-        # resolve share links
+            
         if '/share/' in url:
             try:
-                r = self.session.get(url, headers=self.headers, timeout=REQUEST_TIMEOUT, allow_redirects=True)
-                url = r.url
+                response = self.session.get(
+                    url, 
+                    headers=self.headers, 
+                    timeout=REQUEST_TIMEOUT, 
+                    allow_redirects=True
+                )
+                url = response.url
             except Exception as e:
                 logger.error(f"Failed to resolve share link: {e}")
                 return None
-
+        
         if 'm.facebook.com' in url:
             url = url.replace('m.facebook.com', 'www.facebook.com')
         elif 'facebook.com' in url and 'www.' not in url:
             url = url.replace('facebook.com', 'www.facebook.com')
-
+        
         parsed = urlparse(url)
         if parsed.netloc not in ALLOWED_DOMAINS:
             return None
+            
         return url
-
-    def is_valid_image_url(self, url: str) -> bool:
+    
+    def is_valid_image_url(self, url):
         if not url or not isinstance(url, str):
             return False
+        
         if len(url) > 2000:
             return False
-
+        
         invalid_extensions = ['.js', '.css', '.ico', '.json', '.xml', '.txt', '.html']
         for ext in invalid_extensions:
             if url.lower().endswith(ext):
                 return False
-
+        
+        if '/rsrc.php/' in url and not any(x in url.lower() for x in ['.jpg', '.png', '.webp', '.jpeg', 'image']):
+            return False
+        
         image_indicators = [
-            '.jpg', '.jpeg', '.png', '.webp', '.gif',
+            '.jpg', '.jpeg', '.png', '.webp', '.gif', 
             'photo', 'picture', 'image', '/t39.', '/t1.',
             'fbcdn.net', 'scontent'
         ]
-        return any(ind in url.lower() for ind in image_indicators)
-
-    def clean_url(self, url: str) -> str:
+        
+        return any(indicator in url.lower() for indicator in image_indicators)
+    
+    def clean_url(self, url):
         url = url.replace('&amp;', '&')
         url = url.replace('&lt;', '<').replace('&gt;', '>')
         url = url.replace('&quot;', '"')
@@ -111,71 +125,89 @@ class FacebookProfileScraper:
         url = url.replace('\\/', '/')
         url = url.replace('\\"', '"')
         return url.strip()
-
-    def sanitize_url(self, url: str) -> str:
+    
+    def sanitize_url(self, url):
         url = self.clean_url(url)
         url = url.split('"')[0].split("'")[0].split('>')[0].split('<')[0]
         url = url.split('\\')[0]
-        return url.strip()
-
-    def get_profile_page(self, profile_url: str):
-        normalized_url = self.normalize_profile_url(profile_url)
-        if not normalized_url:
+        url = url.strip()
+        return url
+    
+    def get_profile_page(self, profile_url):
+        try:
+            normalized_url = self.normalize_profile_url(profile_url)
+            if not normalized_url:
+                return None
+            
+            self.headers['Referer'] = 'https://www.facebook.com/'
+            
+            for attempt in range(MAX_RETRIES):
+                try:
+                    response = self.session.get(
+                        normalized_url, 
+                        headers=self.headers, 
+                        timeout=REQUEST_TIMEOUT, 
+                        allow_redirects=True
+                    )
+                    
+                    if response.status_code == 200:
+                        return response.text
+                    elif response.status_code == 429:
+                        logger.warning(f"Rate limited on attempt {attempt + 1}")
+                        time.sleep(2 ** attempt)
+                    else:
+                        logger.error(f"HTTP {response.status_code} on attempt {attempt + 1}")
+                        
+                except requests.exceptions.Timeout:
+                    logger.error(f"Timeout on attempt {attempt + 1}")
+                    if attempt < MAX_RETRIES - 1:
+                        time.sleep(1)
+                        
             return None
-
-        self.headers['Referer'] = 'https://www.facebook.com/'
-
-        for attempt in range(MAX_RETRIES):
-            try:
-                r = self.session.get(
-                    normalized_url,
-                    headers=self.headers,
-                    timeout=REQUEST_TIMEOUT,
-                    allow_redirects=True
-                )
-                if r.status_code == 200:
-                    return r.text
-                if r.status_code == 429:
-                    logger.warning(f"Rate limited on attempt {attempt + 1}")
-                    time.sleep(2 ** attempt)
-                else:
-                    logger.error(f"HTTP {r.status_code} on attempt {attempt + 1}")
-            except requests.exceptions.Timeout:
-                logger.error(f"Timeout on attempt {attempt + 1}")
-                if attempt < MAX_RETRIES - 1:
-                    time.sleep(1)
-            except Exception as e:
-                logger.error(f"Fetch error: {e}")
-
-        return None
-
-    def get_image_size_score(self, url: str) -> int:
-        # prefers bigger sizes when encoded in url
-        patterns = [
+                
+        except Exception as e:
+            logger.error(f"Error fetching profile page: {e}")
+            return None
+    
+    def get_image_size_score(self, url):
+        size_patterns = [
             (r's(\d+)x(\d+)', 1),
             (r'p(\d+)x(\d+)', 1),
             (r'ctp=s(\d+)x(\d+)', 1)
         ]
-        for pat, group in patterns:
-            m = re.search(pat, url)
-            if m:
-                return int(m.group(group))
-
-        for v in [40, 160, 320, 480, 720, 960]:
-            if f's{v}x{v}' in url:
-                return v
-
+        
+        for pattern, group in size_patterns:
+            match = re.search(pattern, url)
+            if match:
+                return int(match.group(group))
+        
+        if 's40x40' in url or 'cp0_dst' in url:
+            return 40
+        if 's160x160' in url:
+            return 160
+        if 's320x320' in url:
+            return 320
+        if 's480x480' in url:
+            return 480
+        if 's720x720' in url:
+            return 720
+        if 's960x960' in url:
+            return 960
+        
         if '?' not in url or 'stp=' not in url:
             return 9999
+        
         return 500
-
-    def extract_image_id(self, url: str):
-        m = re.search(r'/(\d+)_(\d+)_(\d+)_[on]\.jpg', url)
-        return m.group(2) if m else None
-
-    def extract_image_urls(self, html_content: str):
+    
+    def extract_image_id(self, url):
+        id_match = re.search(r'/(\d+)_(\d+)_(\d+)_[on]\.jpg', url)
+        if id_match:
+            return id_match.group(2)
+        return None
+    
+    def extract_image_urls(self, html_content):
         soup = BeautifulSoup(html_content, 'html.parser')
-
+        
         images = {
             'profile_picture': None,
             'profile_picture_hd': None,
@@ -184,118 +216,135 @@ class FacebookProfileScraper:
             'photo_images': [],
             'all_images': set()
         }
-
-        # collect from img tags
-        for img in soup.find_all('img', limit=500):
+        
+        img_tags = soup.find_all('img', limit=500)
+        
+        for img in img_tags:
             src = img.get('src', '')
             if src and self.is_valid_image_url(src):
                 src = self.sanitize_url(src)
                 if src and len(src) < 2000:
                     images['all_images'].add(src)
-
+        
         page_text = str(soup)
-
-        patterns = [
-            r'https://scontent[^"\'\\<>\s]+\\.fbcdn\\.net[^"\'\\<>\s]+\\.(?:jpg|jpeg|png|webp)[^"\'\\<>\s]*',
-            r'"(https://scontent[^"]+\\.fbcdn\\.net[^"]+\\.(?:jpg|jpeg|png|webp)[^"]*)"'
+        
+        url_patterns = [
+            r'https://scontent[^"\'\\<>\s]+\.fbcdn\.net[^"\'\\<>\s]+\.(?:jpg|jpeg|png|webp)[^"\'\\<>\s]*',
+            r'"(https://scontent[^"]+\.fbcdn\.net[^"]+\.(?:jpg|jpeg|png|webp)[^"]*)"',
         ]
-
-        for pat in patterns:
-            for u in re.findall(pat, page_text, re.IGNORECASE):
-                if isinstance(u, tuple):
-                    u = u[0] if u else ''
-                u = self.sanitize_url(u)
-                if u and self.is_valid_image_url(u) and len(u) < 2000 and 'fbcdn.net' in u:
-                    images['all_images'].add(u)
-
+        
+        for pattern in url_patterns:
+            found_urls = re.findall(pattern, page_text, re.IGNORECASE)
+            for url in found_urls:
+                if isinstance(url, tuple):
+                    url = url[0] if url else ''
+                
+                url = self.sanitize_url(url)
+                
+                if url and self.is_valid_image_url(url) and len(url) < 2000 and 'fbcdn.net' in url:
+                    images['all_images'].add(url)
+        
         profile_variants = {}
         cover_variants = {}
         photo_candidates = []
-
+        
         for img_url in images['all_images']:
+            img_lower = img_url.lower()
             img_id = self.extract_image_id(img_url)
+            
             is_profile_type = '/t39.30808-1/' in img_url or '3ab345' in img_url or '1d2534' in img_url
             is_cover_type = '/t39.30808-6/' in img_url
+            
             size_score = self.get_image_size_score(img_url)
-
+            
             if is_profile_type and img_id:
-                profile_variants.setdefault(img_id, []).append((size_score, img_url))
-
+                if img_id not in profile_variants:
+                    profile_variants[img_id] = []
+                profile_variants[img_id].append((size_score, img_url))
+            
             if is_cover_type and img_id:
-                cover_variants.setdefault(img_id, []).append((size_score, img_url))
-
+                if img_id not in cover_variants:
+                    cover_variants[img_id] = []
+                cover_variants[img_id].append((size_score, img_url))
+            
             if is_cover_type and size_score >= 320:
                 photo_candidates.append((size_score, img_url))
-
+        
         if profile_variants:
-            best_id = max(profile_variants.keys(), key=lambda k: max(v[0] for v in profile_variants[k]))
-            versions = sorted(profile_variants[best_id], key=lambda x: x[0], reverse=True)
-            images['profile_picture_hd'] = versions[0][1]
-            images['profile_picture'] = versions[0][1]
-
+            largest_profile_id = max(profile_variants.keys(), 
+                                    key=lambda k: max(v[0] for v in profile_variants[k]))
+            profile_versions = sorted(profile_variants[largest_profile_id], 
+                                     key=lambda x: x[0], reverse=True)
+            
+            images['profile_picture_hd'] = profile_versions[0][1]
+            images['profile_picture'] = profile_versions[0][1]
+        
         if cover_variants:
-            best_id = max(cover_variants.keys(), key=lambda k: max(v[0] for v in cover_variants[k]))
-            versions = sorted(cover_variants[best_id], key=lambda x: x[0], reverse=True)
-            images['cover_photo_hd'] = versions[0][1]
-            images['cover_photo'] = versions[0][1]
-
+            largest_cover_id = max(cover_variants.keys(), 
+                                  key=lambda k: max(v[0] for v in cover_variants[k]))
+            cover_versions = sorted(cover_variants[largest_cover_id], 
+                                   key=lambda x: x[0], reverse=True)
+            
+            images['cover_photo_hd'] = cover_versions[0][1]
+            images['cover_photo'] = cover_versions[0][1]
+        
         photo_candidates.sort(reverse=True, key=lambda x: x[0])
         seen_ids = set()
-        unique = []
-        for score, u in photo_candidates:
-            img_id = self.extract_image_id(u)
+        unique_photos = []
+        
+        for score, url in photo_candidates:
+            img_id = self.extract_image_id(url)
             if img_id and img_id not in seen_ids:
                 seen_ids.add(img_id)
-                unique.append(u)
-                if len(unique) >= 10:
+                unique_photos.append(url)
+                if len(unique_photos) >= 10:
                     break
-
-        images['photo_images'] = unique
+        
+        images['photo_images'] = unique_photos
         images['all_images'] = list(images['all_images'])
+        
         return images
-
-    def scrape_profile(self, profile_url: str):
+    
+    def scrape_profile(self, profile_url):
         if not self.validate_url(profile_url):
             logger.error(f"Invalid URL provided: {profile_url}")
             return None
-
+            
         if not self.initialize_session():
             return None
-
-        html = self.get_profile_page(profile_url)
-        if not html:
+        
+        html_content = self.get_profile_page(profile_url)
+        
+        if not html_content:
             return None
-
-        return self.extract_image_urls(html)
-
+        
+        images = self.extract_image_urls(html_content)
+        
+        return images
 
 @app.route('/', methods=['GET'])
-def home():
-    return render_template('index.html')
-
-
-@app.route('/api', methods=['GET'])
 def welcome():
     return jsonify({
         "message": "Facebook Profile Scraper API",
         "description": "Extract profile pictures, cover photos, and other images from Facebook profiles",
-        "warning": "Educational use only. Scraping Facebook may violate their Terms of Service.",
+        "warning": "This tool is for educational purposes only. Scraping Facebook may violate their Terms of Service.",
         "endpoint": "/api/all",
         "usage": "/api/all?url=https://www.facebook.com/username",
-        "parameters": {"url": "Facebook profile URL (required)"},
+        "parameters": {
+            "url": "Facebook profile URL (required)"
+        },
         "example": "/api/all?url=https://www.facebook.com/share/1BsGawqkh/",
-        "developer": "@imrulbhai69",
+        "developer": "imrulbhai69",
         "version": "2.3.0",
         "uptime": str(datetime.now() - start_time)
     })
 
-
 @app.route('/api/all', methods=['GET'])
 def get_all_images():
     request_start = time.time()
-
+    
     profile_url = request.args.get('url', '').strip()
-
+    
     if not profile_url:
         return jsonify({
             "error": "No URL provided",
@@ -304,7 +353,7 @@ def get_all_images():
             "developer": "@imrulbhai69",
             "time_taken": f"{time.time() - request_start:.2f}s"
         }), 400
-
+    
     if 'facebook.com' not in profile_url:
         return jsonify({
             "error": "Invalid URL",
@@ -312,13 +361,13 @@ def get_all_images():
             "developer": "@imrulbhai69",
             "time_taken": f"{time.time() - request_start:.2f}s"
         }), 400
-
+    
     logger.info(f"Processing all images request: {profile_url}")
-
+    
     try:
         scraper = FacebookProfileScraper()
         result = scraper.scrape_profile(profile_url)
-
+        
         if result:
             response_data = {
                 "success": True,
@@ -334,19 +383,18 @@ def get_all_images():
                 "all_images": result['all_images'],
                 "total_count": len(result['all_images']),
                 "developer": "@imrulbhai69",
-                "channel": "t.me/TheSmartDev",
                 "time_taken": f"{time.time() - request_start:.2f}s",
                 "api_uptime": str(datetime.now() - start_time)
             }
             return jsonify(response_data), 200
-
-        return jsonify({
-            "error": "Failed to scrape profile",
-            "message": "Could not extract data from the provided URL (maybe private/login required or blocked)",
-            "developer": "@imrulbhai69",
-            "time_taken": f"{time.time() - request_start:.2f}s"
-        }), 404
-
+        else:
+            return jsonify({
+                "error": "Failed to scrape profile",
+                "message": "Could not extract data from the provided URL",
+                "developer": "@imrulbhai69",
+                "time_taken": f"{time.time() - request_start:.2f}s"
+            }), 404
+            
     except Exception as e:
         logger.error(f"Error processing request: {e}")
         return jsonify({
@@ -356,12 +404,6 @@ def get_all_images():
             "time_taken": f"{time.time() - request_start:.2f}s"
         }), 500
 
-
 if __name__ == '__main__':
-    print("Facebook Profile Scraper API v2.3 + Imrul’s Zone UI")
+    print(" Facebook Profile Scraper API v2.3")
     app.run(host='0.0.0.0', port=5000, threaded=True, debug=False)
-    import os
-
-if name == "main":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, threaded=True, debug=False)
